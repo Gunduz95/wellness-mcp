@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+table_columns.txt
+api_check.txt
+out.txt
+SESSION_NOTES.md
+test_server.py
+test_api.py
