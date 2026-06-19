@@ -5,9 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mcp.server.fastmcp import FastMCP
 from wellness.client import query
 
-import os
-port = int(os.environ.get("PORT", 8000))
-mcp = FastMCP("wellness", host="0.0.0.0", port=port)
+mcp = FastMCP("wellness", host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
 
 
 @mcp.tool()
@@ -87,4 +85,5 @@ def describe_table(table: str) -> dict:
 
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    transport = os.getenv("MCP_TRANSPORT", "stdio")
+    mcp.run(transport=transport)
