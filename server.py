@@ -1,44 +1,181 @@
 import sys
 import os
+import re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP
 from wellness.client import query
 
-mcp = FastMCP("wellness", host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+# Global behaviour rules. Surfaced to the client AI so answers stay minimal.
+INSTRUCTIONS = """\
+WELLNESS — Japanese healthcare facility database (hospitals, clinics, doctors,
+departments, addresses, beds, staff). Always use these tools, never web search.
+
+HOW TO ANSWER (follow exactly):
+- "how many / count / number of ..." → call wellness_count → reply with ONLY the
+  number (e.g. "342"). No table, no list.
+- "list / names of / which ..." → call wellness_query with fields=["正式名称"] →
+  reply with ONLY a plain list of names.
+- "details / show / info about ..." → call wellness_query with the few relevant
+  fields → reply with ONE clean markdown table.
+- Never print WELLNESS_NO unless explicitly asked.
+- Never describe your query steps, tool calls, or reasoning. No "Here are...",
+  no preamble. Output only the final answer.
+
+FACILITY TYPE — map the user's word to 分類コード (a T_MED_00 column). This is
+REQUIRED for correct counts:
+- "病院" / "hospital"                 → {"分類コード": 0}
+- "診療所" / "クリニック" / "clinic"   → {"分類コード": 1}
+- "歯科" / "dental"                   → {"分類コード": 2}
+- "施設" / "医療機関" / "facility", or no type word → do NOT filter by 分類コード
+  (counts every type).
+Example: "how many hospitals in Kanagawa" → {"都道府県コード": 14, "分類コード": 0}
+→ 297. Without 分類コード it would wrongly return all 5901 facilities.
+
+FILTERING ACROSS TABLES — do it in ONE call. Beds are in T_MED_01, prefecture is
+in T_MED_00. Join the table and prefix the column:
+    base_table="T_MED_00", joins=["T_MED_01"],
+    where={"都道府県コード": 13, "分類コード": 0, "T_MED_01.病床数": {"$gte": 100}}
+NEVER fetch all rows and filter/count manually — the API does it and returns an
+exact total."""
+
+mcp = FastMCP(
+    "wellness",
+    instructions=INSTRUCTIONS,
+    host="0.0.0.0",
+    port=int(os.getenv("PORT", 8000)),
+)
+
+# Prefecture codes for convenience (都道府県コード).
+PREF = "13=東京都 14=神奈川県 27=大阪府 1=北海道 40=福岡県 23=愛知県 28=兵庫県"
+
+
+def _auto_joins(where, joins):
+    """Add any table referenced by a prefixed where-key (e.g. 'T_MED_01.病床数')
+    to the join list, so cross-table filters work without the caller remembering."""
+    found = set(joins or [])
+    if where:
+        for key in where:
+            m = re.match(r"^(T_MED_\d{2})\.", str(key))
+            if m:
+                found.add(m.group(1))
+    return sorted(found) or None
+
+
+def _flatten(record):
+    """Merge one-row nested joined tables up into the top-level record so every
+    column is directly accessible by name. Drops nothing, overwrites nothing."""
+    flat = {}
+    for k, v in record.items():
+        if isinstance(v, list):
+            if v and isinstance(v[0], dict):
+                for kk, vv in v[0].items():
+                    if kk != "WELLNESS_NO":
+                        flat.setdefault(kk, vv)
+        elif isinstance(v, dict):
+            for kk, vv in v.items():
+                if kk != "WELLNESS_NO":
+                    flat.setdefault(kk, vv)
+        else:
+            flat[k] = v
+    return flat
+
+
+def _project(record, fields):
+    """Keep only the requested columns. Field names may carry a table prefix
+    (e.g. 'T_MED_01.病床数') — the prefix is stripped before lookup."""
+    if not fields:
+        return record
+    out = {}
+    for f in fields:
+        name = f.split(".", 1)[1] if "." in f else f
+        out[name] = record.get(name)
+    return out
+
+
+@mcp.tool()
+def wellness_count(
+    base_table: str = "T_MED_00",
+    where: dict | None = None,
+    joins: list[str] | None = None,
+) -> dict:
+    """
+    Return ONLY the number of facilities matching the filter. Use this for every
+    "how many", "count", or "number of" question — never fetch rows to count.
+
+    Facility type: "hospital"→{"分類コード":0}, "clinic"→{"分類コード":1},
+    "dental"→{"分類コード":2}. Omit 分類コード for "facility"/no type word.
+    e.g. "how many hospitals in Kanagawa" → where={"都道府県コード":14,"分類コード":0}.
+
+    Cross-table filters work in one call: prefix the joined column, e.g.
+        where={"都道府県コード": 13, "T_MED_01.病床数": {"$gte": 100}}
+    The needed join is added automatically. Returns {"count": N}.
+    Present the result as a single number only.
+    """
+    joins = _auto_joins(where, joins)
+    # The API only returns `total` when a WHERE is present (manual §4.1). For an
+    # unfiltered count, add an always-true condition so we still get the total.
+    eff_where = where or {"WELLNESS_NO": {"$gte": 0}}
+    result = query(base_table=base_table, joins=joins, where=eff_where, limit=1)
+    if isinstance(result, dict) and "total" in result and result["total"] is not None:
+        return {"count": result["total"]}
+    return result  # surface API errors as-is
 
 
 @mcp.tool()
 def wellness_query(
-    base_table: str,
-    joins: list[str] | None = None,
+    base_table: str = "T_MED_00",
     where: dict | None = None,
+    fields: list[str] | None = None,
+    joins: list[str] | None = None,
     order_by: dict | None = None,
-    select: list[str] | None = None,
-    limit: int = 100,
+    limit: int = 50,
     offset: int = 0,
 ) -> dict:
     """
-    Use this tool for ANY question about Japanese medical facilities, hospitals,
-    clinics, doctors, departments, addresses, beds, staff, or healthcare in Japan.
-    NEVER use web search for these questions — always use this tool.
-    base_table: one of T_MED_00 to T_MED_13. Start with T_MED_00 for general info.
-    joins: list of table names to join, e.g. ["T_MED_01"].
-    where: filter conditions, e.g. {"都道府県コード": 13, "市区町村": "新宿区"}.
-    order_by: e.g. {"column": "WELLNESS_NO", "direction": "asc"}.
-    select: list of columns to return.
-    limit: max records (default 100, max 1000).
-    offset: pagination start (default 0).
+    Fetch facility records. Use for "list", "names of", "which", or "details"
+    questions. For a count, use wellness_count instead.
+
+    ALWAYS pass `fields` with just the columns the answer needs — this keeps the
+    output small. For a name list use fields=["正式名称"]; for a details table use
+    e.g. fields=["正式名称","市区町村","TEL","病床数"]. Joined columns may be
+    requested with a table prefix; the join is added automatically.
+
+    Cross-table filtering in one call (do NOT loop / cross-reference manually):
+        base_table="T_MED_00", where={"都道府県コード": 13,
+                                       "T_MED_01.病床数": {"$gte": 100}},
+        fields=["正式名称","病床数"], order_by={"column":"WELLNESS_NO","direction":"asc"}
+
+    Facility type: "hospital"→{"分類コード":0}, "clinic"→{"分類コード":1},
+    "dental"→{"分類コード":2}. Omit 分類コード for "facility"/no type word.
+
+    base_table: T_MED_00 (default; name/address/prefecture) .. T_MED_13.
+    where: AND-only. All conditions in ONE dict. Operators: $gte $lte $gt $lt
+           $between [a,b] $like "%x%". Do NOT use $or (broken) — run two queries.
+    limit: default 50, max 1000. offset: pagination. Response has exact `total`.
+    Returns {"total": N, "returned": k, "data": [...]} with flat records.
+    Show results as a plain list (names) or one markdown table (details). Never
+    show WELLNESS_NO unless asked. Never explain the query.
+    PREFECTURE CODES: """ + PREF + """
     """
-    return query(
+    joins = _auto_joins(where, joins)
+    result = query(
         base_table=base_table,
         joins=joins,
         where=where,
         order_by=order_by,
-        select=select,
         limit=limit,
         offset=offset,
     )
+    if not isinstance(result, dict) or "data" not in result:
+        return result  # error passthrough
+
+    rows = [_project(_flatten(r), fields) for r in result.get("data", [])]
+    return {
+        "total": result.get("total"),
+        "returned": len(rows),
+        "data": rows,
+    }
 
 
 @mcp.tool()
