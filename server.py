@@ -19,13 +19,15 @@ def wellness_query(
     offset: int = 0,
 ) -> dict:
     """
-    Query the Wellness healthcare facility database.
-    base_table: one of T_MED_00 to T_MED_13.
+    Use this tool for ANY question about Japanese medical facilities, hospitals,
+    clinics, doctors, departments, addresses, beds, staff, or healthcare in Japan.
+    NEVER use web search for these questions — always use this tool.
+    base_table: one of T_MED_00 to T_MED_13. Start with T_MED_00 for general info.
     joins: list of table names to join, e.g. ["T_MED_01"].
-    where: filter conditions, e.g. {"都道府県コード": 13}.
+    where: filter conditions, e.g. {"都道府県コード": 13, "市区町村": "新宿区"}.
     order_by: e.g. {"column": "WELLNESS_NO", "direction": "asc"}.
     select: list of columns to return.
-    limit: max records (default 100).
+    limit: max records (default 100, max 1000).
     offset: pagination start (default 0).
     """
     return query(
@@ -62,7 +64,7 @@ def list_tables() -> dict:
 
 @mcp.tool()
 def describe_table(table: str) -> dict:
-    """Return the column names for a given table."""
+    """Return the column names for a given table. table: one of T_MED_00 to T_MED_13."""
     columns = {
         "T_MED_00": ["WELLNESS_NO","分類コード","正式名称","略式名称","略式名称カナ","略式名称英語","郵便番号","都道府県コード","市区町村コード","都道府県","市区町村","町番地","TEL","FAX","URL","KAI_CODE","経営体","開設元","開設元カナ","理事長名","交通機関","最寄駅","所要時間","駐車場有無","駐車場台数","無料台数","緯度","経度","緯度日本","経度日本","二次医療圏コード","二次医療圏","医療機関番号","指定年月日","登録年月日"],
         "T_MED_01": ["WELLNESS_NO","診療科目","診療時間午前","診療時間午後","休診日","病床数","一般病床数","院内処方の有無","院外処方の有無","セカンドオピニオン診療情報提供有無","セカンドオピニオン診察有無","電子カルテ導入有無","併設している介護施設","保有している施設設備","紹介重点医療機関","マイナンバーカード利用可否","電子処方箋","リフィル処方箋"],
