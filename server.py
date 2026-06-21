@@ -6,6 +6,30 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mcp.server.fastmcp import FastMCP
 from wellness.client import query
 
+
+AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN")
+
+class BearerAuthMiddleware:
+    def __init__(self ,app, token):
+        self.app = app
+        self.token = token
+
+    async def __call__(self,scope,receive,send):
+
+        if scope["type"] != "http":
+            return await self.app(scope,receive,send)
+        
+        headers = dict(scope.get("headers",[]))
+        provided = headers.get(b"authorization",b"").decode()
+        if provided == f"Bearer {self.token}":
+            return await self.app(scope,receive,send)
+        
+        await send({"type": "http.response.start", "status": 401,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body",
+                    "body": b'{"error":"unauthorized"}'})      
+
+
 # Global behaviour rules. Surfaced to the client AI so answers stay minimal.
 INSTRUCTIONS = """\
 WELLNESS — Japanese healthcare facility database (hospitals, clinics, doctors,
@@ -225,4 +249,15 @@ def describe_table(table: str) -> dict:
 
 if __name__ == "__main__":
     transport = os.getenv("MCP_TRANSPORT", "stdio")
-    mcp.run(transport=transport)
+    if transport == "sse":
+        import uvicorn
+        app = mcp.sse_app()
+        if AUTH_TOKEN:
+            app = BearerAuthMiddleware(app,AUTH_TOKEN)
+
+        else:
+            print("WARNING: MCP_AUTH_TOKEN not set — server is OPEN (no auth).")
+
+        uvicorn.run(app,host="0.0.0.0",port = int(os.getenv("PORT",8000)))           
+    else:
+        mcp.run(transport="stdio")
