@@ -143,7 +143,7 @@ def wellness_count(
     result = query(base_table=base_table, joins=joins, where=eff_where, limit=1)
     if isinstance(result, dict) and "total" in result and result["total"] is not None:
         return {"count": result["total"]}
-    return result  # surface API errors as-is
+    raise RuntimeError(result.get("error","Unknown error"))  # surface API errors as-is
 
 
 @mcp.tool()
@@ -180,7 +180,7 @@ def wellness_query(
     Returns {"total": N, "returned": k, "data": [...]} with flat records.
     Show results as a plain list (names) or one markdown table (details). Never
     show WELLNESS_NO unless asked. Never explain the query.
-    PREFECTURE CODES: """ + PREF + """
+    Prefecture: filter by name, e.g. {"都道府県": "神奈川県"} (or by code {"都道府県コード": 14}).
     """
     joins = _auto_joins(where, joins)
     result = query(
@@ -192,7 +192,8 @@ def wellness_query(
         offset=offset,
     )
     if not isinstance(result, dict) or "data" not in result:
-        return result  # error passthrough
+        message = result.get("error", "Unknown error") if isinstance(result, dict) else "Unknown error"
+        raise RuntimeError(message)
 
     rows = [_project(_flatten(r), fields) for r in result.get("data", [])]
     return {
