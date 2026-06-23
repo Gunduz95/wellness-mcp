@@ -90,15 +90,33 @@ mcp = FastMCP(
 PREF = "13=東京都 14=神奈川県 27=大阪府 1=北海道 40=福岡県 23=愛知県 28=兵庫県"
 
 
-def _auto_joins(where, joins):
-    """Add any table referenced by a prefixed where-key (e.g. 'T_MED_01.病床数')
-    to the join list, so cross-table filters work without the caller remembering."""
+# Which joined table provides a given field — lets us auto-join when the caller asks
+# for a column that doesn't live in the base table (T_MED_00).
+FIELD_TABLE = {
+    "診療科目": "T_MED_01", "病床数": "T_MED_01", "一般病床数": "T_MED_01",
+    "診療時間午前": "T_MED_01", "診療時間午後": "T_MED_01", "休診日": "T_MED_01",
+    "院内処方の有無": "T_MED_01", "院外処方の有無": "T_MED_01",
+    "科目": "T_MED_13",
+    "平均患者数_一般": "T_MED_03", "平均患者数_外来": "T_MED_03", "平均在院日数_一般": "T_MED_03",
+    "法人名称": "T_MED_04", "法人番号": "T_MED_04",
+}
+
+
+def _auto_joins(where, joins, fields=None):
+    """Add the tables we need to join automatically, so the caller doesn't have to:
+    - any table named by a prefixed where-key (e.g. 'T_MED_01.病床数'), and
+    - any table that provides a requested field (e.g. fields=['診療科目'] -> T_MED_01)."""
     found = set(joins or [])
     if where:
         for key in where:
             m = re.match(r"^(T_MED_\d{2})\.", str(key))
             if m:
                 found.add(m.group(1))
+    if fields:
+        for f in fields:
+            name = f.split(".", 1)[1] if "." in f else f   # strip any table prefix
+            if name in FIELD_TABLE:
+                found.add(FIELD_TABLE[name])
     return sorted(found) or None
 
 
@@ -203,7 +221,9 @@ def wellness_query(
     show WELLNESS_NO unless asked. Never explain the query.
     Prefecture: filter by name, e.g. {"都道府県": "神奈川県"} (or by code {"都道府県コード": 14}).
     """
-    joins = _auto_joins(where, joins)
+    if fields is None:
+        fields = DEFAULT_FIELDS
+    joins = _auto_joins(where, joins, fields)
     result = query(
         base_table=base_table,
         joins=joins,
@@ -215,9 +235,6 @@ def wellness_query(
     if not isinstance(result, dict) or "data" not in result:
         message = result.get("error", "Unknown error") if isinstance(result, dict) else "Unknown error"
         raise RuntimeError(message)
-    
-
-    if fields is None: fields = DEFAULT_FIELDS
 
     rows = [_project(_flatten(r), fields) for r in result.get("data", [])]
     return {
