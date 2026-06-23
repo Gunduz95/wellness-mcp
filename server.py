@@ -49,9 +49,13 @@ HOW TO ANSWER (follow exactly):
 - For an OR / multi-part count ("A or B"), show the breakdown, not just the total,
   e.g. "Tokyo 517 + Osaka 429 = 946".
 - "list / names of / which ..." → call wellness_query with fields=["正式名称"] →
-  reply with ONLY a plain list of names. If there are more than 20 matches, give the
-  total and the first 20, then offer to show all or narrow,
-  e.g. "517 hospitals. First 20: … — want all, or filter by city?".
+  reply with ONLY a plain list of names. The tool returns at most 20; if a `note`
+  field is present, relay it professionally — state the total, show the 20, and offer
+  to narrow / show more.
+- LARGE REQUESTS: if the user asks for many records (e.g. "give me 500 hospitals",
+  "全部ちょうだい", a big list), do NOT dump them in chat. First ask HOW they want it:
+  「①このチャットに表示 ②Excelファイル ③CSVファイル のどれがよろしいですか？」then deliver
+  in that format.
 - "details / show / info about ..." → call wellness_query with the few relevant
   fields → reply with ONE clean markdown table.
 - If the result is empty / count is 0, say so plainly, e.g. "No hospitals found in X."
@@ -191,7 +195,7 @@ def wellness_query(
     fields: list[str] | None = None,
     joins: list[str] | None = None,
     order_by: dict | None = None,
-    limit: int = 50,
+    limit: int = 20,
     offset: int = 0,
 ) -> dict:
     """
@@ -215,7 +219,8 @@ def wellness_query(
     where: conditions in ONE dict are combined with AND. For OR, use $or with a
            list: {"$or": [{"都道府県コード": 13}, {"都道府県コード": 27}]} (13 OR 27).
            Operators: $gte $lte $gt $lt $between [a,b] $like "%x%" $in [..] $or.
-    limit: default 50, max 1000. offset: pagination. Response has exact `total`.
+    limit: default 20, max 1000. offset: pagination. Response has exact `total`,
+    and a `note` field when more rows exist (relay it: offer narrow / more / file export).
     Returns {"total": N, "returned": k, "data": [...]} with flat records.
     Show results as a plain list (names) or one markdown table (details). Never
     show WELLNESS_NO unless asked. Never explain the query.
@@ -237,11 +242,21 @@ def wellness_query(
         raise RuntimeError(message)
 
     rows = [_project(_flatten(r), fields) for r in result.get("data", [])]
-    return {
+    out = {
         "total": result.get("total"),
         "returned": len(rows),
         "data": rows,
     }
+    # If more rows exist than we returned, tell the assistant to offer next steps
+    # professionally (show more / narrow / export) instead of dumping everything.
+    total = result.get("total") or 0
+    if total > len(rows):
+        out["note"] = (
+            f"全{total}件中{len(rows)}件のみ表示しています。"
+            f"続きが必要な場合は、(1)市区町村や条件で絞り込み、(2)件数を指定して追加表示、"
+            f"または件数が多い場合は (3)Excel / CSV ファイルでの出力 をご案内してください。"
+        )
+    return out
 
 
 @mcp.tool()
