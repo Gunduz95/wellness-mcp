@@ -9,6 +9,9 @@ from wellness.client import query
 
 AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN")
 
+
+DEFAULT_FIELDS = ["正式名称", "都道府県", "市区町村", "町番地", "TEL"]
+
 class BearerAuthMiddleware:
     def __init__(self ,app, token):
         self.app = app
@@ -36,12 +39,25 @@ WELLNESS — Japanese healthcare facility database (hospitals, clinics, doctors,
 departments, addresses, beds, staff). Always use these tools, never web search.
 
 HOW TO ANSWER (follow exactly):
-- "how many / count / number of ..." → call wellness_count → reply with ONLY the
-  number (e.g. "342"). No table, no list.
+- LANGUAGE: answer in Japanese (the customers are Japanese). Translate the answer
+  formats below into natural Japanese, e.g. "東京都の病院：517件",
+  "Xに病院は見つかりませんでした". Only reply in another language if the user clearly
+  writes in it.
+- "how many / count / number of ..." → call wellness_count → reply with ONE short line
+  that RESTATES what was counted (include the filter), then the number,
+  e.g. "Hospitals in Tokyo with 100+ beds: 342". No table, no list, no steps.
+- For an OR / multi-part count ("A or B"), show the breakdown, not just the total,
+  e.g. "Tokyo 517 + Osaka 429 = 946".
 - "list / names of / which ..." → call wellness_query with fields=["正式名称"] →
-  reply with ONLY a plain list of names.
+  reply with ONLY a plain list of names. If there are more than 20 matches, give the
+  total and the first 20, then offer to show all or narrow,
+  e.g. "517 hospitals. First 20: … — want all, or filter by city?".
 - "details / show / info about ..." → call wellness_query with the few relevant
   fields → reply with ONE clean markdown table.
+- If the result is empty / count is 0, say so plainly, e.g. "No hospitals found in X."
+  Never reply with a bare "0" or an empty list.
+- If the question is ambiguous (unclear place or filter), ask ONE short clarifying
+  question instead of guessing.
 - Never print WELLNESS_NO unless explicitly asked.
 - Never describe your query steps, tool calls, or reasoning. No "Here are...",
   no preamble. Output only the final answer.
@@ -93,9 +109,13 @@ def _flatten(record):
     for k, v in record.items():
         if isinstance(v, list):
             if v and isinstance(v[0], dict):
-                for kk, vv in v[0].items():
-                    if kk != "WELLNESS_NO":
-                        flat.setdefault(kk, vv)
+                for row in v:
+                    for kk, vv in row.items():
+                        if kk != "WELLNESS_NO":
+                            if kk in flat:
+                                flat[kk] = str(flat[kk]) + ", " + str(vv)
+                            else:
+                                flat[kk] = vv
         elif isinstance(v, dict):
             for kk, vv in v.items():
                 if kk != "WELLNESS_NO":
@@ -134,7 +154,7 @@ def wellness_count(
     Cross-table filters work in one call: prefix the joined column, e.g.
         where={"都道府県コード": 13, "T_MED_01.病床数": {"$gte": 100}}
     The needed join is added automatically. Returns {"count": N}.
-    Present the result as a single number only.
+    Present as ONE short line: what was counted + the number, e.g. "Hospitals in Tokyo: 517".
     """
     joins = _auto_joins(where, joins)
     # The API only returns `total` when a WHERE is present (manual §4.1). For an
@@ -174,8 +194,9 @@ def wellness_query(
     "dental"→{"分類コード":2}. Omit 分類コード for "facility"/no type word.
 
     base_table: T_MED_00 (default; name/address/prefecture) .. T_MED_13.
-    where: AND-only. All conditions in ONE dict. Operators: $gte $lte $gt $lt
-           $between [a,b] $like "%x%". Do NOT use $or (broken) — run two queries.
+    where: conditions in ONE dict are combined with AND. For OR, use $or with a
+           list: {"$or": [{"都道府県コード": 13}, {"都道府県コード": 27}]} (13 OR 27).
+           Operators: $gte $lte $gt $lt $between [a,b] $like "%x%" $in [..] $or.
     limit: default 50, max 1000. offset: pagination. Response has exact `total`.
     Returns {"total": N, "returned": k, "data": [...]} with flat records.
     Show results as a plain list (names) or one markdown table (details). Never
@@ -194,6 +215,9 @@ def wellness_query(
     if not isinstance(result, dict) or "data" not in result:
         message = result.get("error", "Unknown error") if isinstance(result, dict) else "Unknown error"
         raise RuntimeError(message)
+    
+
+    if fields is None: fields = DEFAULT_FIELDS
 
     rows = [_project(_flatten(r), fields) for r in result.get("data", [])]
     return {
