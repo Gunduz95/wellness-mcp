@@ -306,15 +306,13 @@ def describe_table(table: str) -> dict:
 
 if __name__ == "__main__":
     transport = os.getenv("MCP_TRANSPORT", "stdio")
-    if transport == "sse":
+    if transport in ("sse", "streamable-http"):
         import uvicorn
-        app = mcp.sse_app()
+        app = mcp.streamable_http_app() if transport == "streamable-http" else mcp.sse_app()
         if AUTH_TOKEN:
-            app = BearerAuthMiddleware(app,AUTH_TOKEN)
-
+            app = BearerAuthMiddleware(app, AUTH_TOKEN)
         else:
             print("WARNING: MCP_AUTH_TOKEN not set — server is OPEN (no auth).")
-
-        uvicorn.run(app,host="0.0.0.0",port = int(os.getenv("PORT",8000)))           
+        uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
     else:
         mcp.run(transport="stdio")
