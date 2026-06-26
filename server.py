@@ -48,6 +48,9 @@ HOW TO ANSWER (follow exactly):
   e.g. "Hospitals in Tokyo with 100+ beds: 342". No table, no list, no steps.
 - For an OR / multi-part count ("A or B"), show the breakdown, not just the total,
   e.g. "Tokyo 517 + Osaka 429 = 946".
+- "how many DIFFERENT / unique / 重複を除いた件数", or "breakdown by / ...ごとの件数" →
+  call wellness_aggregate (count_distinct=field, and/or group_by=field). Do NOT count by
+  hand from a row list — the tool computes it exactly in code.
 - "list / names of / which ..." → call wellness_query with fields=["正式名称"] →
   reply with ONLY a plain list of names. The tool returns at most 20; if a `note`
   field is present, relay it professionally — state the total, show the 20, and offer
@@ -106,10 +109,11 @@ FIELD_TABLE = {
 }
 
 
-def _auto_joins(where, joins, fields=None):
+def _auto_joins(where, joins, fields=None, base_table=None):
     """Add the tables we need to join automatically, so the caller doesn't have to:
     - any table named by a prefixed where-key (e.g. 'T_MED_01.病床数'), and
-    - any table that provides a requested field (e.g. fields=['診療科目'] -> T_MED_01)."""
+    - any table that provides a requested field (e.g. fields=['診療科目'] -> T_MED_01).
+    The base table is never joined to itself (that self-join makes the API 500)."""
     found = set(joins or [])
     if where:
         for key in where:
@@ -117,10 +121,15 @@ def _auto_joins(where, joins, fields=None):
             if m:
                 found.add(m.group(1))
     if fields:
+        base_cols = set(TABLE_COLUMNS.get(base_table, [])) if base_table else set()
         for f in fields:
             name = f.split(".", 1)[1] if "." in f else f   # strip any table prefix
+            if name in base_cols:
+                continue                       # field is in the base table; no join needed
             if name in FIELD_TABLE:
                 found.add(FIELD_TABLE[name])
+    if base_table:
+        found.discard(base_table)   # don't join a table onto itself
     return sorted(found) or None
 
 
@@ -178,7 +187,7 @@ def wellness_count(
     The needed join is added automatically. Returns {"count": N}.
     Present as ONE short line: what was counted + the number, e.g. "Hospitals in Tokyo: 517".
     """
-    joins = _auto_joins(where, joins)
+    joins = _auto_joins(where, joins, base_table=base_table)
     # The API only returns `total` when a WHERE is present (manual §4.1). For an
     # unfiltered count, add an always-true condition so we still get the total.
     eff_where = where or {"WELLNESS_NO": {"$gte": 0}}
@@ -232,7 +241,7 @@ def wellness_query(
         # every value (which read as "no data registered"). For non-T_MED_00
         # tables, return the full record instead so all real fields come through.
         fields = DEFAULT_FIELDS if base_table == "T_MED_00" else None
-    joins = _auto_joins(where, joins, fields)
+    joins = _auto_joins(where, joins, fields, base_table=base_table)
     result = query(
         base_table=base_table,
         joins=joins,
@@ -260,6 +269,92 @@ def wellness_query(
             f"続きが必要な場合は、(1)市区町村や条件で絞り込み、(2)件数を指定して追加表示、"
             f"または件数が多い場合は (3)Excel / CSV ファイルでの出力 をご案内してください。"
         )
+    return out
+
+
+# Safety cap: never fetch more than this many rows to aggregate in-code (keeps us well
+# under the API's per-IP rate limit; large result sets are asked to narrow instead).
+AGG_MAX_ROWS = 10000
+
+
+@mcp.tool()
+def wellness_aggregate(
+    base_table: str = "T_MED_00",
+    where: dict | None = None,
+    group_by: str | None = None,
+    count_distinct: str | None = None,
+    joins: list[str] | None = None,
+) -> dict:
+    """
+    Answer questions the raw API CANNOT: COUNT(DISTINCT field) and GROUP BY + count.
+    The 汎用API has no aggregation, so this fetches all matching rows and computes the
+    result IN CODE (exact — unlike asking the model to dedupe rows by hand).
+
+    Use this for: "how many DIFFERENT X", "unique/重複を除いた件数", "breakdown by X",
+    "Xごとの件数". For a plain row count use wellness_count; to list rows use wellness_query.
+
+    - count_distinct="法人名称"          → {"distinct_count": N, "field": ...}
+        e.g. 神奈川の病院の法人数: where={"都道府県コード":14,"分類コード":0},
+             count_distinct="法人名称" → 211 (blank values are not counted).
+    - group_by="開設元"                  → {"groups": {value: row_count, ...}, "group_count": K}
+    - group_by + count_distinct          → {"groups": {value: distinct_count, ...}}
+
+    Joined fields work automatically (e.g. count_distinct="法人名称" auto-joins T_MED_04).
+    Works on ANY base_table. Blank/null values are ignored in counts.
+    Safety: if more than AGG_MAX_ROWS match, returns an {"error": ...} asking to narrow the
+    filter (so it never floods the API). "rows_scanned" is included for transparency.
+    """
+    extra_fields = [f for f in (group_by, count_distinct) if f]
+    joins = _auto_joins(where, joins, extra_fields, base_table=base_table)
+    eff_where = where or {"WELLNESS_NO": {"$gte": 0}}
+
+    head = query(base_table=base_table, joins=joins, where=eff_where, limit=1)
+    if not isinstance(head, dict) or "data" not in head:
+        raise RuntimeError(head.get("error", "Unknown error") if isinstance(head, dict) else "Unknown error")
+    total = head.get("total") or 0
+    if total > AGG_MAX_ROWS:
+        return {"error": (f"{total}件が該当し、正確な集計には多すぎます（上限{AGG_MAX_ROWS}件）。"
+                          f"都道府県コードや分類コードなどで絞り込んでから再度お試しください。"),
+                "matched": total}
+
+    # fetch every matching row (paginate in pages of 1000) and flatten joined data up
+    rows, offset, PAGE = [], 0, 1000
+    while offset < total:
+        page = query(base_table=base_table, joins=joins, where=eff_where, limit=PAGE, offset=offset)
+        batch = page.get("data", []) if isinstance(page, dict) else []
+        if not batch:
+            break
+        rows.extend(_flatten(r) for r in batch)
+        offset += len(batch)
+        if len(batch) < PAGE:
+            break
+
+    def val(r, f):
+        v = r.get(f)
+        return None if v is None or v == "" else v
+
+    out = {"rows_scanned": len(rows)}
+    if group_by:
+        groups: dict = {}
+        for r in rows:
+            g = val(r, group_by)
+            if g is None:
+                continue
+            if count_distinct:
+                groups.setdefault(g, set()).add(val(r, count_distinct))
+            else:
+                groups[g] = groups.get(g, 0) + 1
+        if count_distinct:
+            groups = {k: len({x for x in s if x is not None}) for k, s in groups.items()}
+        out["groups"] = dict(sorted(groups.items(), key=lambda kv: kv[1], reverse=True))
+        out["group_count"] = len(groups)
+    elif count_distinct:
+        vals = {val(r, count_distinct) for r in rows}
+        vals.discard(None)
+        out["distinct_count"] = len(vals)
+        out["field"] = count_distinct
+    else:
+        out["count"] = len(rows)
     return out
 
 
@@ -303,6 +398,17 @@ TABLE_COLUMNS = {
     "T_MED_12": ["WELLNESS_NO","MDCコード","疾患コード","術式コード","値"],
     "T_MED_13": ["WELLNESS_NO","科目"],
 }
+
+# Extend the field->table map with EVERY column of every non-base table, so auto-join
+# (and therefore wellness_aggregate / requested fields) resolves any field, not just the
+# hand-curated common ones. Curated FIELD_TABLE entries above win (setdefault). Base-table
+# (T_MED_00) columns are intentionally skipped — they need no join.
+for _t, _cols in TABLE_COLUMNS.items():
+    if _t == "T_MED_00":
+        continue
+    for _c in _cols:
+        if _c != "WELLNESS_NO":
+            FIELD_TABLE.setdefault(_c, _t)
 
 
 @mcp.tool()
