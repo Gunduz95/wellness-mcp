@@ -227,7 +227,11 @@ def wellness_query(
     Prefecture: filter by name, e.g. {"都道府県": "神奈川県"} (or by code {"都道府県コード": 14}).
     """
     if fields is None:
-        fields = DEFAULT_FIELDS
+        # The minimal default set only exists on T_MED_00. For any other base
+        # table those columns are absent, so projecting to them would null out
+        # every value (which read as "no data registered"). For non-T_MED_00
+        # tables, return the full record instead so all real fields come through.
+        fields = DEFAULT_FIELDS if base_table == "T_MED_00" else None
     joins = _auto_joins(where, joins, fields)
     result = query(
         base_table=base_table,
@@ -280,28 +284,46 @@ def list_tables() -> dict:
     }
 
 
+# Known-good baseline columns per table (verified against the live DB 2026-06-26).
+# Used as a complete, stable fallback; describe_table also unions in any columns the
+# live data reveals, so newly-added columns are picked up without editing this map.
+TABLE_COLUMNS = {
+    "T_MED_00": ["WELLNESS_NO","分類コード","正式名称","略式名称","略式名称カナ","略式名称英語","郵便番号","都道府県コード","市区町村コード","都道府県","市区町村","町番地","TEL","FAX","URL","KAI_CODE","経営体","開設元","開設元カナ","理事長名","交通機関","最寄駅","所要時間","駐車場有無","駐車場台数","無料台数","緯度","経度","緯度日本","経度日本","二次医療圏コード","二次医療圏","医療機関番号","指定年月日","登録年月日","有料台数"],
+    "T_MED_01": ["WELLNESS_NO","診療科目","診療時間午前","診療時間午後","休診日","病床数","一般病床数","院内処方の有無","院外処方の有無","セカンドオピニオン診療情報提供有無","セカンドオピニオン診察有無","電子カルテ導入有無","併設している介護施設","保有している施設設備","紹介重点医療機関","マイナンバーカード利用可否","電子処方箋","リフィル処方箋","新診療科目","療養型病床数","結核病床数","精神病床数","専門外来","セカンドオピニオン費用","セカンドオピニオン備考","診療時間その他"],
+    "T_MED_02": ["WELLNESS_NO","クレジットカード対応有無","対応クレジットカード","電子決済対応有無","バリアフリー化の実施の有無","多機能トイレの設置の有無","全面禁煙の有無","適時及び適温による食事の提供","オーダリングシステム_検査有無","オーダリングシステム_処方有無","電子資格確認","外国語対応の有無","対応外国語","選択可能な入院食の提供","病床外の食事","売店の有無","オーダリングシステム_予約有無","患者満足度の調査_実施有無","食堂の有無","患者満足度の調査_結果提供有無","オンライン診療の有無","オンライン診療の内容","オンライン診療フラグ","対応電子決済","電磁的記録処方箋"],
+    "T_MED_03": ["WELLNESS_NO","平均患者数_一般","平均患者数_外来","平均在院日数_一般","平均患者数_療養","平均患者数_精神","平均患者数_結核","平均患者数_感染","平均患者数_在宅","平均在院日数_療養","平均在院日数_結核","平均在院日数_精神","平均在院日数_感染"],
+    "T_MED_04": ["WELLNESS_NO","法人番号","法人名称","法人都道府県","法人市区町村","法人町番地","法人グループ"],
+    "T_MED_05": ["WELLNESS_NO","職種区分","職種","値"],
+    "T_MED_06": ["WELLNESS_NO","領域コード","内容コード","件数"],
+    "T_MED_07": ["WELLNESS_NO","対応領域コード","内容コード"],
+    "T_MED_08": ["WELLNESS_NO","予防接種コード"],
+    "T_MED_09": ["WELLNESS_NO","ID"],
+    "T_MED_10": ["WELLNESS_NO","分類コード","内容コード"],
+    "T_MED_11": ["WELLNESS_NO","内容コード"],
+    "T_MED_12": ["WELLNESS_NO","MDCコード","疾患コード","術式コード","値"],
+    "T_MED_13": ["WELLNESS_NO","科目"],
+}
+
+
 @mcp.tool()
 def describe_table(table: str) -> dict:
     """Return the column names for a given table. table: one of T_MED_00 to T_MED_13."""
-    columns = {
-        "T_MED_00": ["WELLNESS_NO","分類コード","正式名称","略式名称","略式名称カナ","略式名称英語","郵便番号","都道府県コード","市区町村コード","都道府県","市区町村","町番地","TEL","FAX","URL","KAI_CODE","経営体","開設元","開設元カナ","理事長名","交通機関","最寄駅","所要時間","駐車場有無","駐車場台数","無料台数","緯度","経度","緯度日本","経度日本","二次医療圏コード","二次医療圏","医療機関番号","指定年月日","登録年月日"],
-        "T_MED_01": ["WELLNESS_NO","診療科目","診療時間午前","診療時間午後","休診日","病床数","一般病床数","院内処方の有無","院外処方の有無","セカンドオピニオン診療情報提供有無","セカンドオピニオン診察有無","電子カルテ導入有無","併設している介護施設","保有している施設設備","紹介重点医療機関","マイナンバーカード利用可否","電子処方箋","リフィル処方箋"],
-        "T_MED_02": ["WELLNESS_NO","クレジットカード対応有無","対応クレジットカード","電子決済対応有無","バリアフリー化の実施の有無","多機能トイレの設置の有無","全面禁煙の有無","適時及び適温による食事の提供","オーダリングシステム_検査有無","オーダリングシステム_処方有無","電子資格確認"],
-        "T_MED_03": ["WELLNESS_NO","平均患者数_一般","平均患者数_外来","平均在院日数_一般"],
-        "T_MED_04": ["WELLNESS_NO","法人番号","法人名称","法人都道府県","法人市区町村","法人町番地"],
-        "T_MED_05": ["WELLNESS_NO","職種区分","職種","値"],
-        "T_MED_06": ["WELLNESS_NO","領域コード","内容コード"],
-        "T_MED_07": ["WELLNESS_NO","対応領域コード","内容コード"],
-        "T_MED_08": ["WELLNESS_NO","予防接種コード"],
-        "T_MED_09": ["WELLNESS_NO","ID"],
-        "T_MED_10": ["WELLNESS_NO","分類コード","内容コード"],
-        "T_MED_11": ["WELLNESS_NO","内容コード"],
-        "T_MED_12": ["WELLNESS_NO","MDCコード","疾患コード","術式コード","値"],
-        "T_MED_13": ["WELLNESS_NO","科目"],
-    }
-    if table not in columns:
+    if table not in TABLE_COLUMNS:
         return {"error": f"Unknown table: {table}"}
-    return {"table": table, "columns": columns[table]}
+    # Start from the verified baseline (always complete), then union in any columns
+    # the live data exposes — the API omits null columns per row, so we sample
+    # several rows to catch the full set and any columns added since the baseline.
+    cols = list(TABLE_COLUMNS[table])
+    try:
+        sample = query(base_table=table, limit=50)
+        if isinstance(sample, dict) and sample.get("data"):
+            for row in sample["data"]:
+                for k, v in row.items():
+                    if k not in cols and not isinstance(v, (list, dict)):
+                        cols.append(k)
+    except Exception:
+        pass  # live enrichment is best-effort; baseline already covers known columns
+    return {"table": table, "columns": cols}
 
 
 if __name__ == "__main__":
